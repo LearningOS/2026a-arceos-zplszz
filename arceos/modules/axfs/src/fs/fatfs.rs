@@ -192,9 +192,16 @@ impl VfsNodeOps for DirWrapper<'static> {
             src_path, dst_path
         );
 
-        self.0
-            .rename(src_path, &self.0, dst_path)
-            .map_err(as_vfs_err)
+        match self.0.rename(src_path, &self.0, dst_path) {
+            Err(fatfs::Error::AlreadyExists) => {
+                // FAT can only rename to a free entry. Replace existing files only.
+                self.0.open_file(src_path).map_err(as_vfs_err)?;
+                self.0.open_file(dst_path).map_err(as_vfs_err)?;
+                self.0.remove(dst_path).map_err(as_vfs_err)?;
+                self.0.rename(src_path, &self.0, dst_path).map_err(as_vfs_err)
+            }
+            result => result.map_err(as_vfs_err),
+        }
     }
 }
 

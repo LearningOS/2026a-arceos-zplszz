@@ -10,6 +10,8 @@ use core::fmt;
 pub use crate::dev::Disk;
 #[cfg(feature = "myfs")]
 pub use crate::fs::myfs::MyFileSystemIf;
+#[cfg(feature = "ramfs")]
+pub use crate::fs::ramfs::RamFileSystem;
 
 /// Alias of [`axfs_vfs::VfsNodeType`].
 pub type FileType = axfs_vfs::VfsNodeType;

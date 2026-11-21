@@ -4,6 +4,7 @@ use core::ffi::{c_void, c_char, c_int};
 use axhal::arch::TrapFrame;
 use axhal::trap::{register_trap_handler, SYSCALL};
 use axerrno::LinuxError;
+use memory_addr::{VirtAddr, VirtAddrRange, PAGE_SIZE_4K};
 use axtask::current;
 use axtask::TaskExtRef;
 use axhal::paging::MappingFlags;
@@ -66,7 +67,8 @@ impl From<MmapProt> for MappingFlags {
             flags |= MappingFlags::READ;
         }
         if value.contains(MmapProt::PROT_WRITE) {
-            flags |= MappingFlags::WRITE;
+            // RISC-V leaf entries with W=1 and R=0 are reserved.
+            flags |= MappingFlags::READ | MappingFlags::WRITE;
         }
         if value.contains(MmapProt::PROT_EXEC) {
             flags |= MappingFlags::EXECUTE;
@@ -131,16 +133,59 @@ fn handle_syscall(tf: &TrapFrame, syscall_num: usize) -> isize {
     ret
 }
 
-#[allow(unused_variables)]
 fn sys_mmap(
     addr: *mut usize,
     length: usize,
     prot: i32,
     flags: i32,
     fd: i32,
-    _offset: isize,
+    offset: isize,
 ) -> isize {
-    unimplemented!("no sys_mmap!");
+    syscall_body!(sys_mmap, {
+        let prot = MmapProt::from_bits(prot).filter(|p| !p.is_empty()).ok_or(LinuxError::EINVAL)?;
+        let flags = MmapFlags::from_bits(flags).ok_or(LinuxError::EINVAL)?;
+        if length == 0 || offset < 0 || offset as usize % PAGE_SIZE_4K != 0 {
+            return Err(LinuxError::EINVAL);
+        }
+        if flags.bits() != MmapFlags::MAP_PRIVATE.bits() {
+            return Err(LinuxError::EOPNOTSUPP);
+        }
+        let size = length.checked_add(PAGE_SIZE_4K - 1).ok_or(LinuxError::ENOMEM)?
+            & !(PAGE_SIZE_4K - 1);
+
+        let curr = current();
+        let mut aspace = curr.task_ext().aspace.lock();
+        let base = aspace.base().max(VirtAddr::from(PAGE_SIZE_4K));
+        let limit = VirtAddrRange::new(base, aspace.end());
+        let hint = ((addr as usize) & !(PAGE_SIZE_4K - 1)).into();
+        let start = aspace.find_free_area(hint, size, limit)
+            .or_else(|| aspace.find_free_area(base, size, limit))
+            .ok_or(LinuxError::ENOMEM)?;
+
+        let mut buf = [0; PAGE_SIZE_4K];
+        let first_chunk = size.min(buf.len());
+        let first_read = api::read_file_at(fd, offset as u64, &mut buf[..first_chunk])?;
+        aspace.map_alloc(start, size, prot.into(), true).map_err(|_| LinuxError::ENOMEM)?;
+        let mut load = || -> axerrno::LinuxResult<()> {
+            let mut copied = 0;
+            let mut count = first_read;
+            while count != 0 {
+                aspace.write(start + copied, &buf[..count])?;
+                copied += count;
+                if copied == size {
+                    break;
+                }
+                let chunk = (size - copied).min(buf.len());
+                count = api::read_file_at(fd, offset as u64 + copied as u64, &mut buf[..chunk])?;
+            }
+            Ok(())
+        };
+        if let Err(err) = load() {
+            aspace.unmap(start, size)?;
+            return Err(err);
+        }
+        Ok(start.as_usize())
+    })
 }
 
 fn sys_openat(dfd: c_int, fname: *const c_char, flags: c_int, mode: api::ctypes::mode_t) -> isize {

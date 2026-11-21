@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use axfs_vfs::{VfsError, VfsNodeType, VfsResult};
+use axfs_vfs::{VfsError, VfsNodeType, VfsOps, VfsResult};
 
 use crate::*;
 
@@ -133,4 +133,34 @@ fn test_ramfs() {
     assert_eq!(root.remove("./foo//.//f3"), Ok(()));
     assert_eq!(root.remove("./foo"), Ok(()));
     assert!(ramfs.root_dir_node().get_entries().is_empty());
+}
+
+#[test]
+fn rename_preserves_file_identity_and_does_not_remove_destination_on_error() -> VfsResult {
+    let root = RamFileSystem::new().root_dir();
+    root.create("dir", VfsNodeType::Dir)?;
+    root.create("dir/old", VfsNodeType::File)?;
+    root.create("dir/new", VfsNodeType::File)?;
+    let old = root.clone().lookup("dir/old")?;
+    let new = root.clone().lookup("dir/new")?;
+    old.write_at(0, b"data")?;
+
+    assert_eq!(
+        root.rename("dir/missing", "dir/new"),
+        Err(VfsError::NotFound)
+    );
+    assert!(Arc::ptr_eq(&new, &root.clone().lookup("dir/new")?));
+    assert_eq!(root.rename("dir/old", "new"), Err(VfsError::Unsupported));
+
+    root.rename("dir/old", "dir/new")?;
+    assert_eq!(
+        root.clone().lookup("dir/old").err(),
+        Some(VfsError::NotFound)
+    );
+    let renamed = root.lookup("dir/new")?;
+    assert!(Arc::ptr_eq(&old, &renamed));
+    let mut buf = [0; 4];
+    assert_eq!(renamed.read_at(0, &mut buf)?, 4);
+    assert_eq!(&buf, b"data");
+    Ok(())
 }

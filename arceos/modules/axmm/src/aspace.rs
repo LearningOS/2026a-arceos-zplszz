@@ -170,11 +170,9 @@ impl AddrSpace {
             return ax_err!(InvalidInput, "address not aligned");
         }
 
-        self.pt
-            .unmap_region(start, size, true)
-            .map_err(paging_err_to_ax_err)?
-            .ignore();
-        Ok(())
+        self.areas
+            .unmap(start, size, &mut self.pt)
+            .map_err(mapping_err_to_ax_err)
     }
 
     /// To process data in this area with the given function.
